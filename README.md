@@ -13,14 +13,18 @@ The system supports both **live simulation** using the LBM and **real-time predi
 - **Optimization loop** that adjusts shape to target performance metrics
 - **FastAPI + responsive interface** for real-time interactivity
 
-## Demo Screenshot
-
 ![Surrogate vs LBM Screenshot](doc/screenshot.png)
 
 ## LBM Animation
+
+A sample animation for a randomly generated polygon.
+
 ![LBM animation](doc/velocity.gif)
 
 ## GNN inference performance
+
+The trained surrogate's OOS r-squared across three target metrics.
+
 ![Training performance](doc/r2_wings.png)
 
 ## Technologies Used
@@ -47,9 +51,12 @@ This project reflects my interest in **bringing machine learning to bear on phys
 
 ## Future Directions
 
-- Active learning loop to retrain the surrogate on uncertain samples (using MC dropout at inference time)
+- Active learning loop to retrain the surrogate on uncertain samples (using MC dropout at inference time for uncertainty quantification)
 - Extension to 3D shapes and more complex fluid domains
-- Integration with physics-informed loss functions or PDE solvers (e.g., FNO)
+- Integration with physics-informed loss functions and architectures (e.g., FNO to capture the full flow field)
+- Unit tests: for any kind of production use these are not optional!
+- Model checkpointing and training resumption
+- Bridge to production: set up CI/CD, integrate with cloud experiment tracking beyond local MLFlow, container orchestration e.g., using kubernetes, and monitoring
 
 ## How to use
 
@@ -60,11 +67,11 @@ Assuming dependencies are satisfied, there are two main avenues:
 
 ### CLI tools
 
-These are all accessed by passing flags to ```python main.py```
+These are all accessed by passing flags to ```python main.py```, see ```python main.py --help```.
 
 A minimal workflow involves generating training data (with ```--generate-training-data```) and then fitting a GNN (with or without hyperparameter optimisation) using ```--train-gnn```.
 
-Once these tasks are complete, it will be possible to launch the web UI to perform inference using the trained surrogate. E.g., ```uvicorn main:app --reload --port 8001```
+Once these tasks are complete, it will be possible to launch the web UI to perform inference using the trained surrogate. E.g., ```uvicorn main:app --reload --port 8001```.
 
 
 
