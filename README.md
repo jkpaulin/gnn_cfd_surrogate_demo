@@ -76,6 +76,7 @@ A minimal workflow involves generating training data (with ```--generate-trainin
 
 Once these tasks are complete, it will be possible to launch the web UI to perform inference using the trained surrogate. E.g., ```uvicorn main:app --reload --port 8001```.
 
+See ```pre_trained_model``` to skip the dataset generation and training phase.
 
 
 ## License
