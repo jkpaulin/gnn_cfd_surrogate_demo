@@ -17,6 +17,8 @@ It was developed as part of a personal upskilling effort to transition into appl
 ## Demo Screenshot
 
 ![Surrogate vs LBM Screenshot](doc/screenshot.png)
+![Training performance](doc/r2_wings.png)
+![LBM animation](doc/velocity.gif)
 
 ## Technologies Used
 
