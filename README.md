@@ -16,8 +16,7 @@ The system supports both **live simulation** using the LBM and **real-time predi
 ![Surrogate vs LBM Screenshot](doc/screenshot.png)
 
 In this image, the surrogate was used to find an optimal geometry that gives rise to user-specified lift, drag, and wake vorticity requirements. The surrogate forecast and subsequent full CFD measurements are shown in the table.
-Goal: ```Optimising for targets: {'drag': 5.0, 'lift': 2.0, 'mean_abs_wake_vorticity': 0.003}
-```
+Goal: ```Optimising for targets: {'drag': 5.0, 'lift': 2.0, 'mean_abs_wake_vorticity': 0.003}```
 
 ## LBM Animation
 
