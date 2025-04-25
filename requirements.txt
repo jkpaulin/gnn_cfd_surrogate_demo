@@ -1,0 +1,15 @@
+fastapi
+imageio
+matplotlib
+numpy
+pandas
+plotly
+pydantic
+scipy
+seaborn
+shapely
+scikit-image
+scikit-learn
+torch
+torch-geometric
+tqdm
