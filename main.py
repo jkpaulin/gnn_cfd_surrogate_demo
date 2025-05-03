@@ -71,7 +71,7 @@ TARGET_INDICES = np.array([ALL_TARGETS.index(t) for t in SELECTED_TARGETS])
 ALL_TARGETS = np.array(ALL_TARGETS)
 
 # The dataset dir will be created at training data generation if it does not exist
-DATASET_DIR = "PATH_TO_TRAINING_DATASET"
+DATASET_DIR = "dataset"
 
 # ======================================================
 # FastAPI RESTful interface
@@ -206,10 +206,10 @@ def load_optimised_model_and_scaler():
         heads=4,
     )
 
-    model.load_state_dict(torch.load("PATH_TO_SAVED_MODEL.pth"))
+    model.load_state_dict(torch.load("pre_trained_model/gnn_model_v6.pth"))
     model.eval()
 
-    with open("PATH_TO_SAVED_SCALER.pkl", "rb") as f:
+    with open("pre_trained_model/gnn_scaler_v6.pkl", "rb") as f:
         scaler = pickle.load(f)
 
     print(f"Loaded GNN surrogate {model} and scaler")
@@ -586,7 +586,8 @@ def sample_winglike_polys():
             grid_shape=(128, 128),
         )
 
-        polygon = np.vstack([shape, shape[0]])
+        polygon = polygon_to_vertices(shape)
+        polygon = np.vstack([polygon, polygon[0]])
 
         ax.plot(polygon[:, 0], polygon[:, 1], "-o", markersize=2)
         ax.set_aspect("equal")
@@ -1107,6 +1108,7 @@ def run_single(gif_filename=None, shape_bias="wing", wind_tunnel_walls=False):
     if gif_filename is not None:
         save_velocity_frames(u_frames, mask, output_dir="frames")
         create_gif_from_frames("frames", gif_filename, fps=10)
+        print(f'Wrote animated gif to {gif_filename}')
 
     visualize_velocity(u, mask, scale=0.1, stride=4)
 
@@ -1593,7 +1595,7 @@ def optimise(
 
     desired_scaled = scaler.transform([desired_targets])[0]
 
-    shape_bias = "wing"
+    shape_bias = "wings"
 
     if shape_bias == "spiky":
 
@@ -1883,8 +1885,8 @@ def parse_args():
     )
     parser.add_argument(
         "--train-gnn",
-        action="store_false",
-        default=True,
+        action="store_true",
+        default=False,
         help="Train the Graph Neural Network",
     )
     parser.add_argument(
@@ -1919,7 +1921,7 @@ def main():
     args = parse_args()
 
     if args.run_single:
-        run_single(gif_filename="PATH_FOR_SAVING_ANIMATED_GIF.gif")
+        run_single(gif_filename="animations/lbm_anim_v0.gif")
 
     if args.generate_training_data:
         create_training_data_from_full_cfd(
@@ -1933,9 +1935,9 @@ def main():
         model, scaler = train_gnn(
             hyperopt=1, search_method="grid"
         )  # <= 0 to not do hyperopt
-        torch.save(model.state_dict(), "gnn_model_v6.pth")
-        pickle.dump(scaler, open("gnn_scaler_v6.pkl", "wb"))
-        print(f"Wrote gnn_model_v6.pth and gnn_scaler_v6.pkl")
+        torch.save(model.state_dict(), "gnn_model_v7.pth")
+        pickle.dump(scaler, open("gnn_scaler_v7.pkl", "wb"))
+        print(f"Wrote gnn_model_v7.pth and gnn_scaler_v7.pkl")
 
     if args.optimise_targets:
         test_targets = {
