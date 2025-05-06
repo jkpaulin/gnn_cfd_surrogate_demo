@@ -201,7 +201,7 @@ def load_optimised_model_and_scaler():
         hidden_dim=128,
         out_dim=len(SELECTED_TARGETS),
         num_layers=3,
-        dropout=0.0,
+        dropout=0.1,  # Enable dropout for uncertainty estimation
         use_gat=True,
         heads=4,
     )
@@ -424,6 +424,7 @@ class SimpleGNN(nn.Module):
         self.dropout = dropout
 
         self.convs = nn.ModuleList()
+        self.dropouts = nn.ModuleList()  # Add explicit dropout layers
 
         # First layer
         if use_gat:
@@ -432,6 +433,7 @@ class SimpleGNN(nn.Module):
             )
         else:
             self.convs.append(GCNConv(in_dim, hidden_dim))
+        self.dropouts.append(nn.Dropout(p=dropout))
 
         # Hidden layers
         for _ in range(num_layers - 1):
@@ -441,16 +443,50 @@ class SimpleGNN(nn.Module):
                 )
             else:
                 self.convs.append(GCNConv(hidden_dim, hidden_dim))
+            self.dropouts.append(nn.Dropout(p=dropout))
 
         self.lin = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        for conv in self.convs:
+        for conv, dropout in zip(self.convs, self.dropouts):
             x = F.relu(conv(x, edge_index))
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = dropout(x)  # Use explicit dropout layer
         x = global_mean_pool(x, batch)
         return self.lin(x)
+
+
+def enable_dropout(model: nn.Module) -> None:
+    """
+    Sets all dropout layers to train mode so they keep dropping units
+    even when the rest of the model is in eval mode.
+    """
+    for m in model.modules():
+        if isinstance(m, nn.Dropout):
+            m.train()
+            m.p = 0.1  # Set dropout probability directly on the layer
+
+@torch.no_grad()
+def mc_predict(loader, model, n_samples: int = 50):
+    """
+    Performs MC-dropout inference.
+    Returns:
+        mean  - tensor [N, out_dim]
+        std   - tensor [N, out_dim]  (epistemic uncertainty proxy)
+    """
+    # Set model to train mode to enable dropout
+    model.train()
+    preds = []
+
+    for _ in range(n_samples):
+        batch_preds = []
+        for batch in loader:         # works with any PyG DataLoader
+            batch_preds.append(model(batch))
+        preds.append(torch.cat(batch_preds, dim=0))
+
+    stacked = torch.stack(preds)     # [S, N, out_dim]
+    return stacked.mean(0), stacked.std(0)
+
 
 
 # ======================================================
@@ -1337,7 +1373,7 @@ def train_gnn(hyperopt, search_method, force_cpu=True):
             hidden_dim=128,
             out_dim=len(SELECTED_TARGETS),
             num_layers=3,
-            dropout=0.0,
+            dropout=0.1,  # Enable dropout for uncertainty estimation
             use_gat=True,
             heads=4,
         ).to(device)
@@ -1765,48 +1801,49 @@ def track_surrogate_errors_training_data():
     dataset = ShapeCFDDataset(DATASET_DIR)  # physical units on targets
 
     track_surrogate_errors(
-        model, dataset, scaler, device="cpu", target_indices=TARGET_INDICES
+        model, dataset, scaler, device="cpu", target_indices=TARGET_INDICES, n_mc=50
     )
 
 
-def track_surrogate_errors(model, dataset, scaler, device="cpu", target_indices=None):
+def track_surrogate_errors(
+    model,
+    dataset,
+    scaler,
+    device: str = "cpu",
+    target_indices=None,
+    n_mc: int = 50,
+):
     """
-    Evaluates surrogate model on dataset and records error vs shape features.
-
-    Args:
-        model: trained GNN model.
-        dataset: PyTorch Geometric dataset with Data objects.
-        scaler: fitted scaler used on training targets.
-        device: 'cpu' or 'cuda'.
-        target_indices: list of indices for the targets of interest (e.g., [0,1,2])
-
-    Returns:
-        Plotly parallel coordinates plot.
+    Adds MC-dropout uncertainty to the existing diagnostics.
     """
-    model.eval()
     model.to(device)
 
+    # 1) One-shot MC-dropout over the whole pool (batch_size>1 for speed).
+    pool_loader = DataLoader(dataset, batch_size=64, shuffle=False)
+    mean, std = (t.cpu() for t in mc_predict(pool_loader, model, n_samples=n_mc))
+
+    # Convert to np for easy indexing
+    mean_np, std_np = mean.numpy(), std.numpy()
+
+    if target_indices is not None:
+        mean_np = mean_np[:, target_indices]
+        std_np = std_np[:, target_indices]
+
+    # Optional: bring predictions *and* std into physical units
+    mean_phys = scaler.inverse_transform(mean_np)
+    std_phys = std_np * scaler.scale_[target_indices] if target_indices is not None else std_np * scaler.scale_
+
+    # 2) Per-sample feature / error bookkeeping
     records = []
+    single_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
-
-    for data in loader:
-        data = data.to(device)
-        with torch.no_grad():
-            pred = model(data).cpu().numpy().flatten()
-
+    for idx, data in enumerate(single_loader):
         true = data.y.cpu().numpy().flatten()
-
         if target_indices is not None:
-            # pred = pred[target_indices] # pred is only FOR the tgt indices
             true = true[target_indices]
 
-        pred_phys = scaler.inverse_transform([pred])[0]
-        true_phys = true  # scaler.inverse_transform([true])[0]
+        error = mean_squared_error(true, mean_phys[idx])
 
-        error = mean_squared_error(true_phys, pred_phys)
-
-        # Compute shape features from `x`
         vertices = data.x.cpu().numpy()
         asymmetry, area, vertex_std = compute_polygon_features(vertices)
 
@@ -1816,57 +1853,73 @@ def track_surrogate_errors(model, dataset, scaler, device="cpu", target_indices=
                 "area": area,
                 "vertex_std": vertex_std,
                 "error": error,
+                "uncertainty": float(std_phys[idx].mean()),  # collapse dim if needed
             }
         )
 
     df = pd.DataFrame(records)
 
-    # Normalize for parallel coordinates
+    # 3) Parallel coordinates (colour by error or uncertainty as you wish)
     scaled_df = pd.DataFrame(MinMaxScaler().fit_transform(df), columns=df.columns)
 
     fig = px.parallel_coordinates(
         scaled_df,
-        dimensions=["asymmetry", "area", "vertex_std", "error"],
-        color="error",
+        dimensions=["asymmetry", "area", "vertex_std", "error", "uncertainty"],
+        color="uncertainty",
         color_continuous_scale=px.colors.sequential.Viridis,
-        title="Surrogate Error vs. Polygon Shape Features",
+        title="Surrogate Error and Uncertainty vs. Polygon Shape Features",
     )
     fig.show()
 
     render_top_error_shapes(df, dataset)
 
+    # Plot error vs uncertainty scatter
+    plt.figure(figsize=(8, 6))
+    plt.scatter(df['uncertainty'], df['error'], alpha=0.6)
+    plt.xlabel('Uncertainty (MC-dropout std)')
+    plt.ylabel('Error (MSE)')
+    plt.title('Model Error vs Uncertainty')
+    plt.grid(True)
+    # Compute and add R-squared between uncertainty and error
+    import statsmodels.api as sm
+    X = sm.add_constant(df['uncertainty'])
+    model = sm.OLS(df['error'], X).fit()
+    r2 = model.rsquared
+    plt.text(0.05, 0.95, f'R² = {r2:.3f}', 
+             transform=plt.gca().transAxes,
+             bbox=dict(facecolor='white', alpha=0.8))
+
     return df
 
 
-def render_top_error_shapes(df, dataset, top_n=49, grid_shape=(7, 7), figsize=(12, 12)):
+def render_top_error_shapes(
+    df,
+    dataset,
+    top_n = 49,
+    grid_shape = (7, 7),
+    figsize = (12, 12),
+):
     """
-    Renders the shapes with the highest surrogate errors in a grid.
-
-    Args:
-        df (pd.DataFrame): Output from track_surrogate_errors.
-        dataset (list or Dataset): Corresponding dataset of Data objects.
-        top_n (int): Number of top-error cases to render.
-        grid_shape (tuple): Shape of the subplot grid.
-        figsize (tuple): Size of the figure.
+    Now also annotates each tile with its MC‑dropout std.
     """
-    # Find top-N error indices
-    top_indices = df["error"].nlargest(top_n).index
-
+    top_idx = df["error"].nlargest(top_n).index
     fig, axes = plt.subplots(*grid_shape, figsize=figsize)
     axes = axes.flatten()
 
-    for ax, idx in zip(axes, top_indices):
-        data = dataset[idx]
-        vertices = data.x.cpu().numpy()
-        polygon = np.vstack([vertices, vertices[0]])  # close the shape
+    for ax, i in zip(axes, top_idx):
+        data = dataset[i]
+        verts = data.x.cpu().numpy()
+        poly = np.vstack([verts, verts[0]])
 
-        ax.plot(polygon[:, 0], polygon[:, 1], "-o", markersize=2)
+        ax.plot(poly[:, 0], poly[:, 1], "-o", markersize=2)
         ax.set_aspect("equal")
         ax.axis("off")
-        ax.set_title(f"Err={df.iloc[idx]['error']:.2f}", fontsize=8)
+        ax.set_title(
+            f"Err={df.iloc[i]['error']:.2f}\nσ={df.iloc[i]['uncertainty']:.3f}",
+            fontsize=8,
+        )
 
     plt.tight_layout()
-    plt.show()
 
 
 def parse_args():
@@ -1964,6 +2017,8 @@ def main():
 
     if args.sample_winglike_polys:
         sample_winglike_polys()
+
+    plt.show()
 
 
 if __name__ == "__main__":
