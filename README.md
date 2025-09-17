@@ -50,7 +50,7 @@ The trained surrogate's OOS r-squared across three target metrics.
 
 ## Motivation
 
-This project reflects my interest in **bringing machine learning to bear on physical systems**—especially in areas like simulation acceleration, surrogate modeling, and closed-loop optimization. It draws inspiration from work at leading scientific AI/ML companies, and showcases what can be done at small scale with suitable integration of classical and modern techniques.
+This project reflects my interest in **bringing machine learning to bear on physical systems** - especially in areas like simulation acceleration, surrogate modeling, and closed-loop optimization. It draws inspiration from work at leading scientific AI/ML companies, and showcases what can be done at small scale with suitable integration of classical and modern techniques.
 
 ## Future Directions
 

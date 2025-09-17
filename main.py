@@ -327,7 +327,7 @@ class ShapeCFDDataset(InMemoryDataset):
                     continue
                 full_path = os.path.join(dirpath, f)
                 try:
-                    data = torch.load(full_path)
+                    data = torch.load(full_path, weights_only=False)
                     if (
                         not hasattr(data, "y")
                         or data.y.ndim != 1
@@ -424,7 +424,6 @@ class SimpleGNN(nn.Module):
         self.dropout = dropout
 
         self.convs = nn.ModuleList()
-        self.dropouts = nn.ModuleList()  # Add explicit dropout layers
 
         # First layer
         if use_gat:
@@ -433,7 +432,6 @@ class SimpleGNN(nn.Module):
             )
         else:
             self.convs.append(GCNConv(in_dim, hidden_dim))
-        self.dropouts.append(nn.Dropout(p=dropout))
 
         # Hidden layers
         for _ in range(num_layers - 1):
@@ -443,15 +441,16 @@ class SimpleGNN(nn.Module):
                 )
             else:
                 self.convs.append(GCNConv(hidden_dim, hidden_dim))
-            self.dropouts.append(nn.Dropout(p=dropout))
 
+        # Add dropout only before the final linear layer
+        self.dropout_layer = nn.Dropout(p=dropout)
         self.lin = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        for conv, dropout in zip(self.convs, self.dropouts):
+        for conv in self.convs:
             x = F.relu(conv(x, edge_index))
-            x = dropout(x)  # Use explicit dropout layer
+        x = self.dropout_layer(x)  # Apply dropout before pooling
         x = global_mean_pool(x, batch)
         return self.lin(x)
 
@@ -1273,7 +1272,7 @@ def sample_hypers_grid():
     return hypers
 
 
-def train_gnn(hyperopt, search_method, force_cpu=True):
+def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
     """
     Train the GNN with optional hyperparameter optimisation (random or grid)
     """
@@ -1396,13 +1395,14 @@ def train_gnn(hyperopt, search_method, force_cpu=True):
     test_loss = evaluate(model, device, test_loader, nn.MSELoss())
     print(f"Test Loss: {test_loss:.4f}")
 
-    plot_predictions_vs_targets(
-        model=model,
-        device=device,
-        test_loader=test_loader,
-        scaler=scaler,
-        target_names=SELECTED_TARGETS,
-    )
+    if visualise:
+        plot_predictions_vs_targets(
+            model=model,
+            device=device,
+            test_loader=test_loader,
+            scaler=scaler,
+            target_names=SELECTED_TARGETS,
+        )
 
     return model, scaler
 
@@ -1885,7 +1885,7 @@ def track_surrogate_errors(
     X = sm.add_constant(df['uncertainty'])
     model = sm.OLS(df['error'], X).fit()
     r2 = model.rsquared
-    plt.text(0.05, 0.95, f'R² = {r2:.3f}', 
+    plt.text(0.05, 0.95, f'R² = {r2:.3f}',
              transform=plt.gca().transAxes,
              bbox=dict(facecolor='white', alpha=0.8))
 
@@ -1966,11 +1966,196 @@ def parse_args():
         default=False,
         help="Diagnostic exploration of geometric priors",
     )
+    parser.add_argument(
+        "--active-learning",
+        action="store_true",
+        default=False,
+        help="Run active learning loop to improve surrogate model",
+    )
+    parser.add_argument(
+        "--uncertainty-cutoff",
+        type=float,
+        default=0.1,
+        help="Uncertainty threshold for triggering CFD simulation",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=5,
+        help="Number of new samples to collect before retraining",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=20,
+        help="Maximum number of active learning iterations",
+    )
     return parser.parse_args()
 
 
-def main():
+def run_active_learning(
+    uncertainty_cutoff: float = 0.1,
+    batch_size: int = 5,
+    max_iterations: int = 20,
+    initial_model_path: str = None,
+    min_samples_for_correlation: int = 100,  # Minimum samples to compute correlation
+):
+    """
+    Run active learning loop to improve surrogate model.
 
+    Args:
+        uncertainty_cutoff: Threshold for triggering CFD simulation
+        batch_size: Number of new samples to collect before retraining
+        max_iterations: Maximum number of active learning iterations
+        initial_model_path: Path to pre-trained model to bootstrap from
+        min_samples_for_correlation: Minimum number of samples needed to compute error-uncertainty correlation
+    """
+    # 1. Load or initialize model
+    if initial_model_path:
+        model, scaler = load_optimised_model_and_scaler()
+        print(f"Loaded pre-trained model from {initial_model_path}")
+    else:
+        # Generate initial training data
+        create_training_data_from_full_cfd(
+            use_multiprocessing=True,
+            n_samples=100,  # Start with a small dataset
+            shape_type="wing",
+            wake_bounds=(96, 176, 38, 88),
+        )
+        # Train initial model
+        model, scaler = train_gnn(hyperopt=0, search_method="grid")
+        print("Trained initial model")
+
+    # Track correlation history
+    correlation_history = []
+    dropout_history = [model.dropout]
+
+    # 2. Active learning loop
+    for iteration in range(max_iterations):
+        print(f"\nActive Learning Iteration {iteration + 1}/{max_iterations}")
+
+        # Generate a pool of candidate wing shapes
+        print("Generating candidate wing shapes...")
+        candidate_shapes = []
+        for _ in range(100):  # Generate 100 candidate shapes
+            # Sample random parameters for wing generation
+            n_points = int(16 + 32 * np.random.rand())
+            chord_length = 15 + 30 * np.random.rand()
+            max_camber = 0.02 + 0.1 * np.random.rand()
+            camber_position = 0.1 + 0.5 * np.random.rand()
+            thickness = 0.03 + 0.4 * np.random.rand()
+            angle_of_attack = np.pi * 2 * np.random.rand()
+
+            # Generate wing shape
+            poly = generate_parametric_airfoil(
+                n_points=n_points,
+                chord_length=chord_length,
+                max_camber=max_camber,
+                camber_position=camber_position,
+                thickness=thickness,
+                angle_of_attack_deg=angle_of_attack,
+                grid_shape=(128, 256),
+            )
+            vertices = polygon_to_vertices(poly)
+            candidate_shapes.append(vertices)
+
+        # Convert candidate shapes to PyG Data objects
+        candidate_data = [generate_graph_from_vertices(vertices) for vertices in candidate_shapes]
+        candidate_loader = DataLoader(candidate_data, batch_size=64, shuffle=False)
+
+        # Evaluate uncertainty on candidate shapes
+        mean, std = mc_predict(candidate_loader, model, n_samples=50)
+        std_np = std.numpy()
+
+        # Find shapes with high uncertainty
+        high_uncertainty_indices = np.where(std_np.mean(axis=1) > uncertainty_cutoff)[0]
+        print(f"Found {len(high_uncertainty_indices)} candidate shapes with high uncertainty")
+
+        if len(high_uncertainty_indices) == 0:
+            print("No high uncertainty shapes found. Stopping active learning.")
+            break
+
+        # Select batch_size shapes with highest uncertainty
+        selected_indices = high_uncertainty_indices[np.argsort(std_np[high_uncertainty_indices].mean(axis=1))[-batch_size:]]
+
+        # Run CFD on selected shapes
+        print(f"Running CFD on {len(selected_indices)} new shapes...")
+        for idx in selected_indices:
+            vertices = candidate_shapes[idx]
+
+            # Generate mask and run CFD
+            mask, _ = rasterize_polygon_from_grid_vertices(vertices, grid_shape=(128, 256))
+            rho, u, f, _ = run_lbm(mask, n_steps=1000, u0=0.2, frame_interval=1001)
+            omega = compute_vorticity(u)
+            wake_bounds = (96, 176, 38, 88)
+            targets = compute_scalar_targets(u, f, omega, mask, wake_bounds, rho=rho)
+
+            # Save new data point
+            new_data = polygon_to_graph(Polygon(vertices), targets)
+            torch.save(new_data, os.path.join(DATASET_DIR, f"sample_{len(ShapeCFDDataset(DATASET_DIR)):06d}.pt"))
+
+        # Retrain model
+        print("Retraining model with new data...")
+        model, scaler = train_gnn(hyperopt=0, search_method="grid")
+
+        # Save model checkpoint
+        torch.save(model.state_dict(), f"pre_trained_model/gnn_model_active_{iteration}.pth")
+        pickle.dump(scaler, open(f"pre_trained_model/gnn_scaler_active_{iteration}.pkl", "wb"))
+
+        # Evaluate error-uncertainty correlation if we have enough samples
+        dataset = ShapeCFDDataset(DATASET_DIR)
+        if len(dataset) >= min_samples_for_correlation:
+            # Split into train/test
+            n_test = min(100, len(dataset) // 5)  # Use up to 100 samples for testing
+            test_indices = np.random.choice(len(dataset), n_test, replace=False)
+            test_data = [dataset[i] for i in test_indices]
+            test_loader = DataLoader(test_data, batch_size=64, shuffle=False)
+
+            # Get predictions and uncertainties
+            mean, std = mc_predict(test_loader, model, n_samples=50)
+            mean_np, std_np = mean.numpy(), std.numpy()
+
+            # Get true values and align with SELECTED_TARGETS
+            true_values = np.array([data.y.numpy()[TARGET_INDICES] for data in test_data])
+
+            # Compute errors and uncertainties
+            errors = np.abs(mean_np - true_values)
+            uncertainties = std_np
+
+            # Compute correlation
+            correlation = np.corrcoef(errors.flatten(), uncertainties.flatten())[0, 1]
+            correlation_history.append(correlation)
+
+            print(f"Error-uncertainty correlation: {correlation:.3f}")
+
+            # Plot correlation history
+            plt.figure(figsize=(10, 5))
+            plt.subplot(1, 2, 1)
+            plt.plot(correlation_history, 'o-')
+            plt.xlabel('Iteration')
+            plt.ylabel('Correlation')
+            plt.title('Error-Uncertainty Correlation')
+
+            plt.subplot(1, 2, 2)
+            plt.scatter(uncertainties.flatten(), errors.flatten(), alpha=0.3)
+            plt.xlabel('Uncertainty')
+            plt.ylabel('Error')
+            plt.title(f'Current Correlation: {correlation:.3f}')
+            plt.tight_layout()
+            plt.savefig(f'correlation_plot_iter_{iteration}.png')
+            plt.close()
+
+            # Adjust dropout rate if correlation is too low
+            if correlation < 0.3 and iteration > 0:  # Only adjust after first iteration
+                new_dropout = min(0.5, model.dropout + 0.05)  # Increase dropout up to 0.5
+                print(f"Low correlation detected. Increasing dropout from {model.dropout:.2f} to {new_dropout:.2f}")
+                model.dropout = new_dropout
+                dropout_history.append(new_dropout)
+
+    return model, scaler, correlation_history, dropout_history
+
+
+def main():
     args = parse_args()
 
     if args.run_single:
@@ -1986,21 +2171,17 @@ def main():
 
     if args.train_gnn:
         model, scaler = train_gnn(
-            hyperopt=1, search_method="grid"
+            hyperopt=0, search_method="grid", visualise=True
         )  # <= 0 to not do hyperopt
-        torch.save(model.state_dict(), "gnn_model_v7.pth")
-        pickle.dump(scaler, open("gnn_scaler_v7.pkl", "wb"))
-        print(f"Wrote gnn_model_v7.pth and gnn_scaler_v7.pkl")
+        torch.save(model.state_dict(), "gnn_model_v8.pth")
+        pickle.dump(scaler, open("gnn_scaler_v8.pkl", "wb"))
+        print(f"Wrote gnn_model_v8.pth and gnn_scaler_v8.pkl")
 
     if args.optimise_targets:
         test_targets = {
             "drag": 0.011159762859833,
             "lift": 3.0,
             "mean_abs_wake_vorticity": 0.0031619607853942866,
-            # 'max_wake_vorticity': 0.027121600561166997,
-            # 'mean_velocity_wake': 0.12720911680224747,
-            # 'std_velocity_wake': 0.09038716502351885,
-            # 'kinetic_energy_total': 610.4620099763782
         }
 
         optimise_targets(
@@ -2017,6 +2198,15 @@ def main():
 
     if args.sample_winglike_polys:
         sample_winglike_polys()
+
+    if args.active_learning:
+        run_active_learning(
+            uncertainty_cutoff=args.uncertainty_cutoff,
+            batch_size=args.batch_size,
+            max_iterations=args.max_iterations,
+            initial_model_path="pre_trained_model/gnn_model_v6.pth",  # Optional: start from pre-trained model
+            min_samples_for_correlation=100  # Minimum samples to compute correlation
+        )
 
     plt.show()
 

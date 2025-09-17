@@ -3,7 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Copy app code
-COPY . .
+COPY pre_trained_model ./pre_trained_model
+COPY requirements.txt ./requirements.txt
+COPY static ./static
+COPY main.py ./main.py
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
