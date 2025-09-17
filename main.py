@@ -471,6 +471,7 @@ def enable_dropout(model: nn.Module) -> None:
             m.train()
             m.p = 0.1  # Set dropout probability directly on the layer
 
+
 @torch.no_grad()
 def mc_predict(loader, model, n_samples: int = 50):
     """
@@ -485,13 +486,12 @@ def mc_predict(loader, model, n_samples: int = 50):
 
     for _ in range(n_samples):
         batch_preds = []
-        for batch in loader:         # works with any PyG DataLoader
+        for batch in loader:  # works with any PyG DataLoader
             batch_preds.append(model(batch))
         preds.append(torch.cat(batch_preds, dim=0))
 
-    stacked = torch.stack(preds)     # [S, N, out_dim]
+    stacked = torch.stack(preds)  # [S, N, out_dim]
     return stacked.mean(0), stacked.std(0)
-
 
 
 # ======================================================
@@ -1142,14 +1142,12 @@ def run_single(gif_filename=None, shape_bias="wing", wind_tunnel_walls=False):
     # mask is a boolean grid where True = fluid, False = solid
     # u will be a (ny, nx, 2) array of final velocities
 
-    rho, u, f, u_frames = run_lbm(
-        mask, n_steps=1000, tau=0.6, u0=0.2, frame_interval=2
-    )
+    rho, u, f, u_frames = run_lbm(mask, n_steps=1000, tau=0.6, u0=0.2, frame_interval=2)
 
     if gif_filename is not None:
         save_velocity_frames(u_frames, mask, output_dir="frames")
         create_gif_from_frames("frames", gif_filename, fps=50)
-        print(f'Wrote animated gif to {gif_filename}')
+        print(f"Wrote animated gif to {gif_filename}")
 
     visualize_velocity(u, mask, scale=0.1, stride=4)
 
@@ -1309,7 +1307,6 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
         # TODO CUDA support could be added here
     print(f"Device = {device}")
 
-
     start_time = time.time()
 
     experiment_name = "gnn_cfd_training"
@@ -1363,7 +1360,9 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
                     f"hypers_b={hypers["batch_size"]}_hd={hypers["hidden_dim"]}_h={hypers["heads"]}"
                     f"_l={hypers["num_layers"]}_lr={hypers["lr"]}_d={hypers["dropout"]}_g={hypers["use_gat"]}"
                 )
-                with mlflow.start_run(run_name=child_run_name, nested=True) as child_run:
+                with mlflow.start_run(
+                    run_name=child_run_name, nested=True
+                ) as child_run:
                     mlflow.log_params(hypers)
                     model, val_loss = train_model_with_validation(
                         model,
@@ -1387,14 +1386,13 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
                         best_model = model
                         best_hparams = hypers
 
-                    print(f"Current best Loss: {best_loss:.4f} with hypers: {best_hparams}")
+                    print(
+                        f"Current best Loss: {best_loss:.4f} with hypers: {best_hparams}"
+                    )
 
             print(f"\nBest Loss: {best_loss:.4f} with hypers: {best_hparams}")
 
-
             model = best_model
-
-
 
         else:
 
@@ -1428,13 +1426,11 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
             torch.save(model.state_dict(), save_path)
             mlflow.log_artifact(save_path)
 
-
         test_loader = DataLoader(test_norm, batch_size=32)
         test_loss = evaluate(model, device, test_loader, nn.MSELoss())
         print(f"Test Loss: {test_loss:.4f}")
 
         mlflow.log_metric("test_loss_final", test_loss)
-
 
     if visualise:
         plot_predictions_vs_targets(
@@ -1875,7 +1871,11 @@ def track_surrogate_errors(
 
     # Optional: bring predictions *and* std into physical units
     mean_phys = scaler.inverse_transform(mean_np)
-    std_phys = std_np * scaler.scale_[target_indices] if target_indices is not None else std_np * scaler.scale_
+    std_phys = (
+        std_np * scaler.scale_[target_indices]
+        if target_indices is not None
+        else std_np * scaler.scale_
+    )
 
     # 2) Per-sample feature / error bookkeeping
     records = []
@@ -1919,19 +1919,24 @@ def track_surrogate_errors(
 
     # Plot error vs uncertainty scatter
     plt.figure(figsize=(8, 6))
-    plt.scatter(df['uncertainty'], df['error'], alpha=0.6)
-    plt.xlabel('Uncertainty (MC-dropout std)')
-    plt.ylabel('Error (MSE)')
-    plt.title('Model Error vs Uncertainty')
+    plt.scatter(df["uncertainty"], df["error"], alpha=0.6)
+    plt.xlabel("Uncertainty (MC-dropout std)")
+    plt.ylabel("Error (MSE)")
+    plt.title("Model Error vs Uncertainty")
     plt.grid(True)
     # Compute and add R-squared between uncertainty and error
     import statsmodels.api as sm
-    X = sm.add_constant(df['uncertainty'])
-    model = sm.OLS(df['error'], X).fit()
+
+    X = sm.add_constant(df["uncertainty"])
+    model = sm.OLS(df["error"], X).fit()
     r2 = model.rsquared
-    plt.text(0.05, 0.95, f'R² = {r2:.3f}',
-             transform=plt.gca().transAxes,
-             bbox=dict(facecolor='white', alpha=0.8))
+    plt.text(
+        0.05,
+        0.95,
+        f"R² = {r2:.3f}",
+        transform=plt.gca().transAxes,
+        bbox=dict(facecolor="white", alpha=0.8),
+    )
 
     return df
 
@@ -1939,9 +1944,9 @@ def track_surrogate_errors(
 def render_top_error_shapes(
     df,
     dataset,
-    top_n = 49,
-    grid_shape = (7, 7),
-    figsize = (12, 12),
+    top_n=49,
+    grid_shape=(7, 7),
+    figsize=(12, 12),
 ):
     """
     Now also annotates each tile with its MC‑dropout std.
@@ -2104,7 +2109,9 @@ def run_active_learning(
             candidate_shapes.append(vertices)
 
         # Convert candidate shapes to PyG Data objects
-        candidate_data = [generate_graph_from_vertices(vertices) for vertices in candidate_shapes]
+        candidate_data = [
+            generate_graph_from_vertices(vertices) for vertices in candidate_shapes
+        ]
         candidate_loader = DataLoader(candidate_data, batch_size=64, shuffle=False)
 
         # Evaluate uncertainty on candidate shapes
@@ -2113,14 +2120,18 @@ def run_active_learning(
 
         # Find shapes with high uncertainty
         high_uncertainty_indices = np.where(std_np.mean(axis=1) > uncertainty_cutoff)[0]
-        print(f"Found {len(high_uncertainty_indices)} candidate shapes with high uncertainty")
+        print(
+            f"Found {len(high_uncertainty_indices)} candidate shapes with high uncertainty"
+        )
 
         if len(high_uncertainty_indices) == 0:
             print("No high uncertainty shapes found. Stopping active learning.")
             break
 
         # Select batch_size shapes with highest uncertainty
-        selected_indices = high_uncertainty_indices[np.argsort(std_np[high_uncertainty_indices].mean(axis=1))[-batch_size:]]
+        selected_indices = high_uncertainty_indices[
+            np.argsort(std_np[high_uncertainty_indices].mean(axis=1))[-batch_size:]
+        ]
 
         # Run CFD on selected shapes
         print(f"Running CFD on {len(selected_indices)} new shapes...")
@@ -2128,7 +2139,9 @@ def run_active_learning(
             vertices = candidate_shapes[idx]
 
             # Generate mask and run CFD
-            mask, _ = rasterize_polygon_from_grid_vertices(vertices, grid_shape=(128, 256))
+            mask, _ = rasterize_polygon_from_grid_vertices(
+                vertices, grid_shape=(128, 256)
+            )
             rho, u, f, _ = run_lbm(mask, n_steps=1000, u0=0.2, frame_interval=1001)
             omega = compute_vorticity(u)
             wake_bounds = (96, 176, 38, 88)
@@ -2136,15 +2149,24 @@ def run_active_learning(
 
             # Save new data point
             new_data = polygon_to_graph(Polygon(vertices), targets)
-            torch.save(new_data, os.path.join(DATASET_DIR, f"sample_{len(ShapeCFDDataset(DATASET_DIR)):06d}.pt"))
+            torch.save(
+                new_data,
+                os.path.join(
+                    DATASET_DIR, f"sample_{len(ShapeCFDDataset(DATASET_DIR)):06d}.pt"
+                ),
+            )
 
         # Retrain model
         print("Retraining model with new data...")
         model, scaler = train_gnn(hyperopt=0, search_method="grid")
 
         # Save model checkpoint
-        torch.save(model.state_dict(), f"pre_trained_model/gnn_model_active_{iteration}.pth")
-        pickle.dump(scaler, open(f"pre_trained_model/gnn_scaler_active_{iteration}.pkl", "wb"))
+        torch.save(
+            model.state_dict(), f"pre_trained_model/gnn_model_active_{iteration}.pth"
+        )
+        pickle.dump(
+            scaler, open(f"pre_trained_model/gnn_scaler_active_{iteration}.pkl", "wb")
+        )
 
         # Evaluate error-uncertainty correlation if we have enough samples
         dataset = ShapeCFDDataset(DATASET_DIR)
@@ -2160,7 +2182,9 @@ def run_active_learning(
             mean_np, std_np = mean.numpy(), std.numpy()
 
             # Get true values and align with SELECTED_TARGETS
-            true_values = np.array([data.y.numpy()[TARGET_INDICES] for data in test_data])
+            true_values = np.array(
+                [data.y.numpy()[TARGET_INDICES] for data in test_data]
+            )
 
             # Compute errors and uncertainties
             errors = np.abs(mean_np - true_values)
@@ -2175,24 +2199,28 @@ def run_active_learning(
             # Plot correlation history
             plt.figure(figsize=(10, 5))
             plt.subplot(1, 2, 1)
-            plt.plot(correlation_history, 'o-')
-            plt.xlabel('Iteration')
-            plt.ylabel('Correlation')
-            plt.title('Error-Uncertainty Correlation')
+            plt.plot(correlation_history, "o-")
+            plt.xlabel("Iteration")
+            plt.ylabel("Correlation")
+            plt.title("Error-Uncertainty Correlation")
 
             plt.subplot(1, 2, 2)
             plt.scatter(uncertainties.flatten(), errors.flatten(), alpha=0.3)
-            plt.xlabel('Uncertainty')
-            plt.ylabel('Error')
-            plt.title(f'Current Correlation: {correlation:.3f}')
+            plt.xlabel("Uncertainty")
+            plt.ylabel("Error")
+            plt.title(f"Current Correlation: {correlation:.3f}")
             plt.tight_layout()
-            plt.savefig(f'correlation_plot_iter_{iteration}.png')
+            plt.savefig(f"correlation_plot_iter_{iteration}.png")
             plt.close()
 
             # Adjust dropout rate if correlation is too low
             if correlation < 0.3 and iteration > 0:  # Only adjust after first iteration
-                new_dropout = min(0.5, model.dropout + 0.05)  # Increase dropout up to 0.5
-                print(f"Low correlation detected. Increasing dropout from {model.dropout:.2f} to {new_dropout:.2f}")
+                new_dropout = min(
+                    0.5, model.dropout + 0.05
+                )  # Increase dropout up to 0.5
+                print(
+                    f"Low correlation detected. Increasing dropout from {model.dropout:.2f} to {new_dropout:.2f}"
+                )
                 model.dropout = new_dropout
                 dropout_history.append(new_dropout)
 
@@ -2249,7 +2277,7 @@ def main():
             batch_size=args.batch_size,
             max_iterations=args.max_iterations,
             initial_model_path="pre_trained_model/gnn_model_v6.pth",  # Optional: start from pre-trained model
-            min_samples_for_correlation=100  # Minimum samples to compute correlation
+            min_samples_for_correlation=100,  # Minimum samples to compute correlation
         )
 
     plt.show()
