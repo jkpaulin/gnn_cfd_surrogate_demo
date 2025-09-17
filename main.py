@@ -18,6 +18,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import tqdm
 import copy
 import pickle
+import time
+from datetime import datetime
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score
@@ -42,6 +44,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import io
 import base64
+
+import mlflow
+import mlflow.pytorch
+
 
 # ======================================================
 
@@ -1137,12 +1143,12 @@ def run_single(gif_filename=None, shape_bias="wing", wind_tunnel_walls=False):
     # u will be a (ny, nx, 2) array of final velocities
 
     rho, u, f, u_frames = run_lbm(
-        mask, n_steps=1000, tau=0.6, u0=0.2, frame_interval=10
+        mask, n_steps=1000, tau=0.6, u0=0.2, frame_interval=2
     )
 
     if gif_filename is not None:
         save_velocity_frames(u_frames, mask, output_dir="frames")
-        create_gif_from_frames("frames", gif_filename, fps=10)
+        create_gif_from_frames("frames", gif_filename, fps=50)
         print(f'Wrote animated gif to {gif_filename}')
 
     visualize_velocity(u, mask, scale=0.1, stride=4)
@@ -1303,40 +1309,108 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
         # TODO CUDA support could be added here
     print(f"Device = {device}")
 
-    if hyperopt > 0:
 
-        # Random search hyperopt to get best model hypers (and the best model itself)
+    start_time = time.time()
 
-        if search_method == "random":
-            n_evals = hyperopt
-            hyper_space = sample_hypers_random(n_evals)
-        elif search_method == "grid":
-            hyper_space = sample_hypers_grid()
+    experiment_name = "gnn_cfd_training"
+    run_name = f"{hyperopt=}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    mlflow.set_tracking_uri("http://127.0.0.1:5000")
+    mlflow.pytorch.autolog()
+    mlflow.set_experiment(experiment_name)
+    artifacts_dir = "mlflow_artifacts"
+    os.makedirs(artifacts_dir, exist_ok=True)
+
+    with mlflow.start_run(run_name=run_name) as parent_run:
+        mlflow.set_tag("mlflow.runName", run_name)
+
+        if hyperopt > 0:
+
+            # Random search hyperopt to get best model hypers (and the best model itself)
+
+            if search_method == "random":
+                n_evals = hyperopt
+                hyper_space = sample_hypers_random(n_evals)
+            elif search_method == "grid":
+                hyper_space = sample_hypers_grid()
+            else:
+                raise NotImplementedError
+
+            best_loss = float("inf")
+            best_model = None
+            best_hparams = None
+
+            for i, hypers in enumerate(hyper_space):
+
+                print(f"\n[Trial {i+1} / {len(hyper_space)}] Hypers: {hypers}")
+
+                train_loader = DataLoader(
+                    train_norm, batch_size=int(hypers["batch_size"]), shuffle=True
+                )
+                val_loader = DataLoader(val_norm, batch_size=int(hypers["batch_size"]))
+
+                model = SimpleGNN(
+                    hidden_dim=hypers["hidden_dim"],
+                    out_dim=len(SELECTED_TARGETS),
+                    num_layers=hypers["num_layers"],
+                    dropout=hypers["dropout"],
+                    use_gat=hypers["use_gat"],
+                    heads=hypers["heads"],
+                ).to(device)
+                optimizer = torch.optim.Adam(model.parameters(), lr=hypers["lr"])
+                loss_fn = nn.MSELoss()
+
+                child_run_name = (
+                    f"hypers_b={hypers["batch_size"]}_hd={hypers["hidden_dim"]}_h={hypers["heads"]}"
+                    f"_l={hypers["num_layers"]}_lr={hypers["lr"]}_d={hypers["dropout"]}_g={hypers["use_gat"]}"
+                )
+                with mlflow.start_run(run_name=child_run_name, nested=True) as child_run:
+                    mlflow.log_params(hypers)
+                    model, val_loss = train_model_with_validation(
+                        model,
+                        device,
+                        train_loader,
+                        val_loader,
+                        optimizer,
+                        loss_fn,
+                        max_epochs=100,
+                        patience=10,
+                    )
+
+                    print(f"Val Loss: {val_loss:.4f}")
+
+                    save_path = f"{artifacts_dir}/model.pth"
+                    torch.save(model.state_dict(), save_path)
+                    mlflow.log_artifact(save_path)
+
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        best_model = model
+                        best_hparams = hypers
+
+                    print(f"Current best Loss: {best_loss:.4f} with hypers: {best_hparams}")
+
+            print(f"\nBest Loss: {best_loss:.4f} with hypers: {best_hparams}")
+
+
+            model = best_model
+
+
+
         else:
-            raise NotImplementedError
 
-        best_loss = float("inf")
-        best_model = None
-        best_hparams = None
-
-        for i, hypers in enumerate(hyper_space):
-
-            print(f"\n[Trial {i+1} / {len(hyper_space)}] Hypers: {hypers}")
-
-            train_loader = DataLoader(
-                train_norm, batch_size=int(hypers["batch_size"]), shuffle=True
-            )
-            val_loader = DataLoader(val_norm, batch_size=int(hypers["batch_size"]))
+            train_loader = DataLoader(train_norm, batch_size=32, shuffle=True)
+            val_loader = DataLoader(val_norm, batch_size=32)
 
             model = SimpleGNN(
-                hidden_dim=hypers["hidden_dim"],
+                hidden_dim=128,
                 out_dim=len(SELECTED_TARGETS),
-                num_layers=hypers["num_layers"],
-                dropout=hypers["dropout"],
-                use_gat=hypers["use_gat"],
-                heads=hypers["heads"],
+                num_layers=3,
+                dropout=0.1,  # Enable dropout for uncertainty estimation
+                use_gat=True,
+                heads=4,
             ).to(device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=hypers["lr"])
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
             loss_fn = nn.MSELoss()
 
             model, val_loss = train_model_with_validation(
@@ -1350,50 +1424,17 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
                 patience=10,
             )
 
-            print(f"Val Loss: {val_loss:.4f}")
+            save_path = f"{artifacts_dir}/model.pth"
+            torch.save(model.state_dict(), save_path)
+            mlflow.log_artifact(save_path)
 
-            if val_loss < best_loss:
-                best_loss = val_loss
-                best_model = model
-                best_hparams = hypers
 
-            print(f"Current best Loss: {best_loss:.4f} with hypers: {best_hparams}")
+        test_loader = DataLoader(test_norm, batch_size=32)
+        test_loss = evaluate(model, device, test_loader, nn.MSELoss())
+        print(f"Test Loss: {test_loss:.4f}")
 
-        print(f"\nBest Loss: {best_loss:.4f} with hypers: {best_hparams}")
+        mlflow.log_metric("test_loss_final", test_loss)
 
-        model = best_model
-
-    else:
-
-        train_loader = DataLoader(train_norm, batch_size=32, shuffle=True)
-        val_loader = DataLoader(val_norm, batch_size=32)
-
-        model = SimpleGNN(
-            hidden_dim=128,
-            out_dim=len(SELECTED_TARGETS),
-            num_layers=3,
-            dropout=0.1,  # Enable dropout for uncertainty estimation
-            use_gat=True,
-            heads=4,
-        ).to(device)
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
-        loss_fn = nn.MSELoss()
-
-        model, val_loss = train_model_with_validation(
-            model,
-            device,
-            train_loader,
-            val_loader,
-            optimizer,
-            loss_fn,
-            max_epochs=100,
-            patience=10,
-        )
-
-    test_loader = DataLoader(test_norm, batch_size=32)
-    test_loss = evaluate(model, device, test_loader, nn.MSELoss())
-    print(f"Test Loss: {test_loss:.4f}")
 
     if visualise:
         plot_predictions_vs_targets(
@@ -1462,6 +1503,9 @@ def train_model_with_validation(
         print(
             f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
         )
+
+        mlflow.log_metric("train_loss", train_loss, step=epoch)
+        mlflow.log_metric("val_loss", val_loss, step=epoch)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -1736,7 +1780,7 @@ def plot_target_distributions(dataset_dir, target_names=None):
         if fname.endswith(".pt"):
             path = os.path.join(dataset_dir, fname)
             try:
-                data = torch.load(path)
+                data = torch.load(path, weights_only=False)
                 y = data.y
                 if y.ndim == 0:
                     y = y.unsqueeze(0)
@@ -2159,7 +2203,7 @@ def main():
     args = parse_args()
 
     if args.run_single:
-        run_single(gif_filename="animations/lbm_anim_v0.gif")
+        run_single(gif_filename="animations/lbm_anim_20250917.gif")
 
     if args.generate_training_data:
         create_training_data_from_full_cfd(
@@ -2171,7 +2215,7 @@ def main():
 
     if args.train_gnn:
         model, scaler = train_gnn(
-            hyperopt=0, search_method="grid", visualise=True
+            hyperopt=0, search_method="random", visualise=True
         )  # <= 0 to not do hyperopt
         torch.save(model.state_dict(), "gnn_model_v8.pth")
         pickle.dump(scaler, open("gnn_scaler_v8.pkl", "wb"))
