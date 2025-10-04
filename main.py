@@ -30,6 +30,8 @@ from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+from torch.optim import Optimizer
+from torch.nn.modules.loss import _Loss
 from torch.nn import MSELoss
 from torch_geometric.data import Data, Dataset, InMemoryDataset
 from torch_geometric.nn import GCNConv, global_mean_pool, GATConv
@@ -243,16 +245,14 @@ class ShapeCFDDatasetBuilder:
             scale_fraction = np.random.uniform(0.15, 0.35)
 
             if self.shape_type == "spiky":
-
                 polygon = generate_random_polygon(
                     n_points=np.random.randint(10, 50),
                     radius=20,
                     jitter=np.random.uniform(0.05, 0.45),
                     seed=None,
                     asymmetry_strength=np.random.uniform(0.0, 0.95),
-                    angle_of_attack=np.random.uniform(-180, 180),  # degrees clockwise
+                    angle_of_attack=np.pi * 2 * np.random.rand(),
                 )
-
             elif self.shape_type == "wing":
                 polygon = generate_parametric_airfoil(
                     n_points=int(16 + 32 * np.random.rand()),
@@ -260,7 +260,7 @@ class ShapeCFDDatasetBuilder:
                     max_camber=0.02 + 0.1 * np.random.rand(),
                     camber_position=0.1 + 0.5 * np.random.rand(),
                     thickness=0.03 + 0.4 * np.random.rand(),
-                    angle_of_attack_deg=np.pi * 2 * np.random.rand(),
+                    angle_of_attack_deg=180 * 2 * np.random.rand(),
                     grid_shape=(128, 128),
                 )
             else:
@@ -416,19 +416,18 @@ def compute_scaler_from_dataset(dataset, target_indices):
 class SimpleGNN(nn.Module):
     def __init__(
         self,
-        in_dim=2,
-        hidden_dim=64,
-        out_dim=1,
-        num_layers=2,
-        dropout=0.0,
-        use_gat=False,
-        heads=1,
-    ):
+        in_dim: int = 2,
+        hidden_dim: int = 64,
+        out_dim: int = 1,
+        num_layers: int = 2,
+        dropout: float = 0.0,
+        use_gat: bool = False,
+        heads: int = 1,
+    ) -> None:
         super().__init__()
-        assert num_layers >= 1, "There must be at least one hidden layer"
+        assert num_layers >= 2, "There must be at least one hidden layer"
         self.use_gat = use_gat
         self.dropout = dropout
-
         self.convs = nn.ModuleList()
 
         # First layer
@@ -452,7 +451,7 @@ class SimpleGNN(nn.Module):
         self.dropout_layer = nn.Dropout(p=dropout)
         self.lin = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, data):
+    def forward(self, data: Data) -> torch.Tensor:
         x, edge_index, batch = data.x, data.edge_index, data.batch
         for conv in self.convs:
             x = F.relu(conv(x, edge_index))
@@ -623,7 +622,7 @@ def sample_winglike_polys():
             max_camber=0.02 + 0.1 * np.random.rand(),
             camber_position=0.1 + 0.5 * np.random.rand(),
             thickness=0.03 + 0.4 * np.random.rand(),
-            angle_of_attack_deg=np.pi * 2 * np.random.rand(),
+            angle_of_attack_deg=180 * 2 * np.random.rand(),
             grid_shape=(128, 128),
         )
 
@@ -1210,9 +1209,15 @@ def check_device_consistency(model, batch, verbose=True):
     return issues == []  # returns True if all OK
 
 
-def sample_hypers_random(n_evals):
+def sample_hypers_random(n_evals: int) -> list[dict[str, int | float | bool]]:
     """
     Hyperparameter schedule for random search approach
+
+    Args:
+        n_evals (int): The number of random evaluations to sample
+
+    Returns:
+        list[dict]: sampled hyperparameter constellations
     """
     hypers = []
     for i in range(n_evals):
@@ -1224,6 +1229,7 @@ def sample_hypers_random(n_evals):
                 "lr": 10 ** np.random.uniform(-4, -2),
                 "batch_size": np.random.choice([16, 32, 64]),
                 "use_gat": np.random.choice([False, True]),
+                # Note: heads has no effect if use_gat=False
                 "heads": np.random.choice([1, 2, 4, 8]),
             }
         )
@@ -1233,12 +1239,15 @@ def sample_hypers_random(n_evals):
 def sample_hypers_grid():
     """
     Hyperparameter schedule for grid search approach
+
+    Returns:
+        list[dict]: sampled hyperparameter constellations
     """
     hidden_dim_values = np.array([64, 128])
     num_layers_values = np.array([2, 3])
     dropout_values = np.array([0.0, 0.2])
     lr_values = np.power(10.0, np.array([-4, -3, -2]))
-    batch_size_values = np.array([32])  # [16, 32, 64)
+    batch_size_values = np.array([16, 32, 64])
     use_gat_values = np.array([True])
     heads_values = np.array([1, 2, 4, 8])
 
@@ -1323,7 +1332,6 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
         if hyperopt > 0:
 
             # Random search hyperopt to get best model hypers (and the best model itself)
-
             if search_method == "random":
                 n_evals = hyperopt
                 hyper_space = sample_hypers_random(n_evals)
@@ -1445,36 +1453,29 @@ def train_gnn(hyperopt, search_method, force_cpu=True, visualise=False):
 
 
 def train_model_with_validation(
-    model,
-    device,
-    train_loader,
-    val_loader,
-    optimizer,
-    loss_fn,
-    max_epochs=100,
-    patience=10,
-    check_device=False,
-):
+    model: nn.Module,
+    device: str,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    optimizer: Optimizer,
+    loss_fn: _Loss,
+    max_epochs: int = 100,
+    patience: int = 10,
+    check_device: bool = False,
+) -> tuple[nn.Module, float]:
     """
     Inner training loop for a model with a fixed set of hyperparameters
-    Applies early stopping based on validation loss
+    Applies early stopping based on validation loss and patience
     """
-    best_val_loss = float("inf")
-    best_model = None
-    epochs_no_improve = 0
-
+    best_val_loss, best_model, epochs_no_improve = float("inf"), None, 0
     for epoch in range(max_epochs):
         model.train()
-        train_loss = 0
-
+        train_loss = 0.0
         target_indices = torch.tensor(TARGET_INDICES)
-
         for batch in train_loader:
-
+            batch = batch.to(device)
             if check_device:
                 check_device_consistency(model, batch, verbose=False)
-
-            batch = batch.to(device)
             pred = model(batch)
             batch_y = batch.y.view(batch.num_graphs, -1)
             loss = loss_fn(pred, batch_y)
@@ -1485,24 +1486,20 @@ def train_model_with_validation(
 
         # Validation
         model.eval()
-        val_loss = 0
+        val_loss = 0.0
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(device)
                 pred = model(batch)
                 batch_y = batch.y.view(batch.num_graphs, -1)
                 val_loss += loss_fn(pred, batch_y).item()
-
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
-
         print(
             f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
         )
-
         mlflow.log_metric("train_loss", train_loss, step=epoch)
         mlflow.log_metric("val_loss", val_loss, step=epoch)
-
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model = copy.deepcopy(model.state_dict())
@@ -1512,7 +1509,6 @@ def train_model_with_validation(
             if epochs_no_improve >= patience:
                 print(f"Early stopping after {epoch+1} epochs.")
                 break
-
     # Restore best model
     model.load_state_dict(best_model)
     return model, best_val_loss
